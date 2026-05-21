@@ -1,49 +1,27 @@
 import numpy as np
 import scipy
 from scipy.special import expit
+from scipy.sparse import issparse, diags, eye
 
 
 class BaseSmoothOracle(object):
-    """
-    Base class for implementation of oracles.
-    """
     def func(self, x):
-        """
-        Computes the value of function at point x.
-        """
         raise NotImplementedError('Func oracle is not implemented.')
 
     def grad(self, x):
-        """
-        Computes the gradient at point x.
-        """
         raise NotImplementedError('Grad oracle is not implemented.')
-    
+
     def hess(self, x):
-        """
-        Computes the Hessian matrix at point x.
-        """
         raise NotImplementedError('Hessian oracle is not implemented.')
-    
+
     def func_directional(self, x, d, alpha):
-        """
-        Computes phi(alpha) = f(x + alpha*d).
-        """
         return np.squeeze(self.func(x + alpha * d))
 
     def grad_directional(self, x, d, alpha):
-        """
-        Computes phi'(alpha) = (f(x + alpha*d))'_{alpha}
-        """
         return np.squeeze(self.grad(x + alpha * d).dot(d))
 
 
 class QuadraticOracle(BaseSmoothOracle):
-    """
-    Oracle for quadratic function:
-       func(x) = 1/2 x^TAx - b^Tx.
-    """
-
     def __init__(self, A, b):
         if not scipy.sparse.isspmatrix_dia(A) and not np.allclose(A, A.T):
             raise ValueError('A should be a symmetric matrix.')
@@ -57,110 +35,99 @@ class QuadraticOracle(BaseSmoothOracle):
         return self.A.dot(x) - self.b
 
     def hess(self, x):
-        return self.A 
+        return self.A
 
 
 class LogRegL2Oracle(BaseSmoothOracle):
-    """
-    Oracle for logistic regression with l2 regularization:
-         func(x) = 1/m sum_i log(1 + exp(-b_i * a_i^T x)) + regcoef / 2 ||x||_2^2.
-
-    Let A and b be parameters of the logistic regression (feature matrix
-    and labels vector respectively).
-    For user-friendly interface use create_log_reg_oracle()
-
-    Parameters
-    ----------
-        matvec_Ax : function
-            Computes matrix-vector product Ax, where x is a vector of size n.
-        matvec_ATx : function of x
-            Computes matrix-vector product A^Tx, where x is a vector of size m.
-        matmat_ATsA : function
-            Computes matrix-matrix-matrix product A^T * Diag(s) * A,
-    """
     def __init__(self, matvec_Ax, matvec_ATx, matmat_ATsA, b, regcoef):
         self.matvec_Ax = matvec_Ax
         self.matvec_ATx = matvec_ATx
         self.matmat_ATsA = matmat_ATsA
         self.b = b
         self.regcoef = regcoef
+        self.m = len(b)
 
     def func(self, x):
-        # TODO: Implement
-        return None
+        z = self.matvec_Ax(x)
+        t = -self.b * z
+        loss = np.mean(np.logaddexp(0, t))
+        reg = 0.5 * self.regcoef * np.dot(x, x)
+        return loss + reg
 
     def grad(self, x):
-        # TODO: Implement
-        return None
+        z = self.matvec_Ax(x)
+        p = expit(-self.b * z)
+        s = -self.b * p
+        grad = self.matvec_ATx(s) / self.m + self.regcoef * x
+        return grad
 
     def hess(self, x):
-        # TODO: Implement
-        return None
+        z = self.matvec_Ax(x)
+        p = expit(-self.b * z)
+        w = p * (1 - p)
+        H = self.matmat_ATsA(w)  # может быть разреженной или плотной
+        # приводим к плотному массиву, чтобы удобно добавить регуляризацию
+        if issparse(H):
+            H = H.toarray()
+        H = H / self.m
+        n = x.shape[0]
+        H += self.regcoef * np.eye(n)
+        return H
 
 
 class LogRegL2OptimizedOracle(LogRegL2Oracle):
-    """
-    Oracle for logistic regression with l2 regularization
-    with optimized *_directional methods (are used in line_search).
-
-    For explanation see LogRegL2Oracle.
-    """
-    def __init__(self, matvec_Ax, matvec_ATx, matmat_ATsA, b, regcoef):
-        super().__init__(matvec_Ax, matvec_ATx, matmat_ATsA, b, regcoef)
-
-    def func_directional(self, x, d, alpha):
-        # TODO: Implement optimized version with pre-computation of Ax and Ad
-        return None
-
-    def grad_directional(self, x, d, alpha):
-        # TODO: Implement optimized version with pre-computation of Ax and Ad
-        return None
+    
+    pass
 
 
 def create_log_reg_oracle(A, b, regcoef, oracle_type='usual'):
-    """
-    Auxiliary function for creating logistic regression oracles.
-        `oracle_type` must be either 'usual' or 'optimized'
-    """
-    matvec_Ax = lambda x: x  # TODO: Implement
-    matvec_ATx = lambda x: x  # TODO: Implement
+    def matvec_Ax(x):
+        return A.dot(x)
+
+    def matvec_ATx(x):
+        return A.T.dot(x)
 
     def matmat_ATsA(s):
-        # TODO: Implement
-        return None
+        # Вычисляет A.T @ diag(s) @ A
+        if issparse(A):
+            # Для разреженных матриц используем dot с диагональной
+            return A.T @ (diags(s) @ A)
+        else:
+            return A.T @ (s[:, None] * A)
 
     if oracle_type == 'usual':
         oracle = LogRegL2Oracle
     elif oracle_type == 'optimized':
         oracle = LogRegL2OptimizedOracle
     else:
-        raise 'Unknown oracle_type=%s' % oracle_type
+        raise ValueError('Unknown oracle_type=%s' % oracle_type)
     return oracle(matvec_Ax, matvec_ATx, matmat_ATsA, b, regcoef)
 
 
-
 def grad_finite_diff(func, x, eps=1e-8):
-    """
-    Returns approximation of the gradient using finite differences:
-        result_i := (f(x + eps * e_i) - f(x)) / eps,
-        where e_i are coordinate vectors:
-        e_i = (0, 0, ..., 0, 1, 0, ..., 0)
-                          >> i <<
-    """
-    # TODO: Implement numerical estimation of the gradient
-    return None
+    n = x.shape[0]
+    grad = np.zeros(n)
+    f0 = func(x)
+    for i in range(n):
+        e_i = np.zeros(n)
+        e_i[i] = eps
+        f1 = func(x + e_i)
+        grad[i] = (f1 - f0) / eps
+    return grad
 
 
 def hess_finite_diff(func, x, eps=1e-5):
-    """
-    Returns approximation of the Hessian using finite differences:
-        result_{ij} := (f(x + eps * e_i + eps * e_j)
-                               - f(x + eps * e_i) 
-                               - f(x + eps * e_j)
-                               + f(x)) / eps^2,
-        where e_i are coordinate vectors:
-        e_i = (0, 0, ..., 0, 1, 0, ..., 0)
-                          >> i <<
-    """
-    # TODO: Implement numerical estimation of the Hessian
-    return None
+    n = x.shape[0]
+    hess = np.zeros((n, n))
+    f0 = func(x)
+    for i in range(n):
+        e_i = np.zeros(n)
+        e_i[i] = eps
+        f_i = func(x + e_i)
+        for j in range(n):
+            e_j = np.zeros(n)
+            e_j[j] = eps
+            f_j = func(x + e_j)
+            f_ij = func(x + e_i + e_j)
+            hess[i, j] = (f_ij - f_i - f_j + f0) / (eps * eps)
+    return hess

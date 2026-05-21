@@ -580,4 +580,3 @@ def test_newton_fail():
     warnings.filterwarnings("default")
     eq_(msg, 'computational_error')
     eq_(history, None)
-
